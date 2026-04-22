@@ -459,54 +459,80 @@ class AshTrader(BaseTrader):
         Stressed long  : sell into bids ≥ fair + 1 to unwind.
         Stressed short : lift asks ≤ fair − 1 to unwind.
         Returns updated position.
+
+        Uses BaseTrader.max_allowed_* inside loops (bid/ask update them). Mixed buy/sell in one tick
+        does not auto-adjust the opposite limit, so we resync from ``pos`` before the normal-mode
+        sell pass and once more at exit for downstream maker/flatten.
         """
         if inventory_stressed:
             if pos > self.INVENTORY_SKEW_THRESHOLD:
-                remaining_sell = max(0, self.position_limit + pos)
                 for bid_price in sorted(self.mkt_buy_orders.keys(), reverse=True):
-                    if remaining_sell <= 0 or float(bid_price) < fair + 1.0:
+                    if self.max_allowed_sell_volume <= 0 or float(bid_price) < fair + 1.0:
                         break
-                    sell_qty = min(self.mkt_buy_orders[bid_price], remaining_sell, self.TAKE_CAP)
+                    sell_qty = min(
+                        self.mkt_buy_orders[bid_price],
+                        self.max_allowed_sell_volume,
+                        self.TAKE_CAP,
+                    )
                     if sell_qty > 0:
                         self.ask(bid_price, sell_qty)
                         pos -= sell_qty
-                        remaining_sell -= sell_qty
 
             elif pos < -self.INVENTORY_SKEW_THRESHOLD:
-                remaining_buy = max(0, self.position_limit - pos)
                 for ask_price in sorted(self.mkt_sell_orders.keys()):
-                    if remaining_buy <= 0 or float(ask_price) > fair - 1.0:
+                    if self.max_allowed_buy_volume <= 0 or float(ask_price) > fair - 1.0:
                         break
-                    buy_qty = min(self.mkt_sell_orders[ask_price], remaining_buy, self.TAKE_CAP)
+                    buy_qty = min(
+                        self.mkt_sell_orders[ask_price],
+                        self.max_allowed_buy_volume,
+                        self.TAKE_CAP,
+                    )
                     if buy_qty > 0:
                         self.bid(ask_price, buy_qty)
                         pos += buy_qty
-                        remaining_buy -= buy_qty
 
+            self._sync_volume_limits_from_position(pos)
             return pos
 
-        # Normal: only cross when edge is sufficient.
-        remaining_buy = max(0, self.position_limit - pos)
+        # Normal: only cross when edge is sufficient (buys then sells).
         for ask_price in sorted(self.mkt_sell_orders.keys()):
             if fair - float(ask_price) < self.EDGE_FROM_FAIR:
                 break
-            buy_qty = min(self.mkt_sell_orders[ask_price], remaining_buy, self.TAKE_CAP)
+            if self.max_allowed_buy_volume <= 0:
+                break
+            buy_qty = min(
+                self.mkt_sell_orders[ask_price],
+                self.max_allowed_buy_volume,
+                self.TAKE_CAP,
+            )
             if buy_qty > 0:
                 self.bid(ask_price, buy_qty)
                 pos += buy_qty
-                remaining_buy -= buy_qty
 
-        remaining_sell = max(0, self.position_limit + pos)
+        # ``ask()`` does not increase buy room; ``pos`` does — refresh sell envelope after buys.
+        self.max_allowed_sell_volume = max(0, self.position_limit + pos)
+
         for bid_price in sorted(self.mkt_buy_orders.keys(), reverse=True):
             if float(bid_price) - fair < self.EDGE_FROM_FAIR:
                 break
-            sell_qty = min(self.mkt_buy_orders[bid_price], remaining_sell, self.TAKE_CAP)
+            if self.max_allowed_sell_volume <= 0:
+                break
+            sell_qty = min(
+                self.mkt_buy_orders[bid_price],
+                self.max_allowed_sell_volume,
+                self.TAKE_CAP,
+            )
             if sell_qty > 0:
                 self.ask(bid_price, sell_qty)
                 pos -= sell_qty
-                remaining_sell -= sell_qty
 
+        self._sync_volume_limits_from_position(pos)
         return pos
+
+    def _sync_volume_limits_from_position(self, pos: int) -> None:
+        """Align caps with simulated inventory after aggressive fills (bid/ask don't bump opposite side)."""
+        self.max_allowed_buy_volume = max(0, self.position_limit - pos)
+        self.max_allowed_sell_volume = max(0, self.position_limit + pos)
 
     # -- maker layer --------------------------------------------------------
 
@@ -541,8 +567,8 @@ class AshTrader(BaseTrader):
             bid_quote = fair_anchor - 1
             ask_quote = fair_anchor + 1
 
-        bid_size = min(self.MAKE_SIZE, max(0, self.position_limit - pos))
-        ask_size = min(self.MAKE_SIZE, max(0, self.position_limit + pos))
+        bid_size = min(self.MAKE_SIZE, self.max_allowed_buy_volume)
+        ask_size = min(self.MAKE_SIZE, self.max_allowed_sell_volume)
 
         def ok_bid() -> bool:
             if bid_quote is None:
@@ -591,14 +617,14 @@ class AshTrader(BaseTrader):
         anchor = int(round(fair))
 
         if pos > self.INVENTORY_SKEW_THRESHOLD:
-            excess    = pos - self.INVENTORY_SKEW_THRESHOLD
-            sell_qty  = min(self.MAKE_SIZE, excess, max(0, self.position_limit + pos))
+            excess = pos - self.INVENTORY_SKEW_THRESHOLD
+            sell_qty = min(self.MAKE_SIZE, excess, self.max_allowed_sell_volume)
             if sell_qty > 0:
                 self.ask(anchor - 1, sell_qty)
 
         elif pos < -self.INVENTORY_SKEW_THRESHOLD:
-            excess   = -pos - self.INVENTORY_SKEW_THRESHOLD
-            buy_qty  = min(self.MAKE_SIZE, excess, max(0, self.position_limit - pos))
+            excess = -pos - self.INVENTORY_SKEW_THRESHOLD
+            buy_qty = min(self.MAKE_SIZE, excess, self.max_allowed_buy_volume)
             if buy_qty > 0:
                 self.bid(anchor + 1, buy_qty)
 
