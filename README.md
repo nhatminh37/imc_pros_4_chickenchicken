@@ -1,5 +1,34 @@
 # Adding a product trader
 
+## Environment setup (Windows)
+
+This repo is a minimal IMC-style submission with only two Python dependencies.
+
+### Prereqs
+
+- Python 3.10+ (you can use `py -V` to check)
+
+### Create a virtual environment
+
+From the repo root:
+
+```powershell
+py -m venv .venv
+```
+
+### Install dependencies
+
+```powershell
+.\.venv\Scripts\python -m pip install -U pip
+.\.venv\Scripts\python -m pip install numpy jsonpickle
+```
+
+### Quick sanity check
+
+```powershell
+.\.venv\Scripts\python -c "import trader; print('import ok')"
+```
+
 The entry point is `Trader.run` in `trader.py`. It loops over a **symbol → class** map, builds one instance per product that has an order book that round, then merges their orders.
 
 ## 1. Register the product and position limit
